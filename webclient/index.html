@@ -58,18 +58,20 @@ var parseMasterFileIndex = function(rawData) {
     return info;
 };
 
-var selectBody = function (id) {
-    $('div').hide();
+var selectBody = function (id, hideOld) {
+    if (hideOld) {
+        $('div').hide();
+    }
     $('#' + id).show();
 };
 
 var showTxInputField = function () {
-    selectBody('query');
+    selectBody('query', false);
     $('#error').text('');
 };
 
 var showError = function (errorText) {
-    selectBody('query');
+    selectBody('query', true);
     $('#error').text(errorText);
 };
 
@@ -84,7 +86,7 @@ var getPrettyFileSize = function (size) {
 };
 
 var showFileInfo = function (mfitxid, info) {
-    selectBody('fileinfo');
+    selectBody('fileinfo', true);
 
     $('#mfitxid').text(mfitxid);
     $('#filename').text(info.filename);
@@ -95,6 +97,7 @@ var showFileInfo = function (mfitxid, info) {
 
     $('#download').prop('disabled', false);
     $('#progress').hide();
+    $('#dlhref').hide();
 };
 
 var readFromQueryField = function () {
@@ -149,6 +152,8 @@ var download = function () {
         $href.show();
 
         $href[0].click();
+
+        $('#query').show();
     };
 
     var getNextDataChunk = function () {
@@ -221,6 +226,9 @@ var init = function () {
         <p style="font-size: 11pt; font-style: italic;">
             Download files hosted on the Garlicoin blockchain using the <a href="https://garlicinsight.com/">Garlic Insight</a> explorer public APIs.
         </p>
+        <p style="font-size: 10pt;">
+            NOTE: This is a single, javascript-enabled webpage.<br />You can download it using <i>Save as</i> and host it anywhere you want!
+        </p>
         <div id="fileinfo" style="display: none; padding-top: 60px;">
             <table cellspacing="10" style="margin-left: auto; margin-right: auto;">
                 <tr>
@@ -272,7 +280,7 @@ var init = function () {
                 <a id="dlhref" style="display: none;" href="#">If the download does not start, click here</a>
             </p>
         </div>
-        <div id="query" style="display: none; padding-top: 150px;">
+        <div id="query" style="display: none; padding-top: auto; padding-bottom: 50%;">
             <p id="error" style="color: #bb0202; font-size: 16pt; font-weight: bold; padding-bottom: 60px;"></p>
             <p style="font-size: 14pt;">Enter the <i><b>Master File Index Transaction ID</b></i> of the file you wish to download</p>
             <input id="txid" size="64" maxlength="64" /> <input id="go" type="button" value="Go"/>
