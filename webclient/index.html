@@ -1,0 +1,281 @@
+<html>
+    <head>
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+        <script language="javascript">
+
+var FileInfo = null;
+
+var readTx = function (txid, successCb, failureCb) {
+    $.ajax({
+        'type':         'GET',
+        'url':          'https://garlicinsight.com/insight-grlc-api/tx/' + txid,
+        'contentType':  'application/json',
+        'dataType':     'json',
+        'success':      function (data, textStatus, jqXHR) {
+            var blocks = [];
+            $.each(data.vout.filter(function (vout) { return vout.scriptPubKey.asm.substr(0, 2) == '0 '; }), function(i, vout) {
+                blocks.push(vout.scriptPubKey.asm.substr(2));
+            });
+            if (blocks.length > 0) {
+                successCb(blocks);
+            } else {
+                failureCb();
+            }
+        },
+        'error':    failureCb
+    });
+};
+
+var hexToBin = function (hex, stripNullPadding) {
+    var out = '';
+
+    $.each(hex.match(/.{2}/g), function (_, byte) {
+        out += String.fromCharCode(parseInt(byte, 16));
+    });
+
+    return stripNullPadding ? out.replace(/\0*$/, '') : out;
+};
+
+var hexToBase64 = function (hex) {
+    return btoa(hexToBin(hex));
+};
+
+var parseMasterFileIndex = function(rawData) {
+    var info = {};
+
+    if (rawData.length != 5 || hexToBin(rawData[0], true) != 'GRLCFILE') {
+        return null;
+    }
+
+    rawData.shift();
+
+    info.filename = hexToBin(rawData[0], true);
+    info.size = parseInt(rawData[1].substr(-16, 16), 16);
+    info.sha1 = rawData[1].substr(0, 40);
+    info.sha256 = rawData[2].substr(0, 64);
+    info.indexChainTxID = rawData[3].substr(0, 64);
+
+    return info;
+};
+
+var selectBody = function (id) {
+    $('div').hide();
+    $('#' + id).show();
+};
+
+var showTxInputField = function () {
+    selectBody('query');
+    $('#error').text('');
+};
+
+var showError = function (errorText) {
+    selectBody('query');
+    $('#error').text(errorText);
+};
+
+var getPrettyFileSize = function (size) {
+    if (size > 10485760)
+        return '' + Math.round(size / 1048576) + ' MiB  (too large for Google Chrome!)';
+
+    if (size > 1048576)
+        return '' + (Math.round(size * 10 / 1048576) / 10) + ' MiB' + (size >= 2097152 ? '  (too large for Google Chrome!)' : '');
+
+    return '' + Math.round(size / 1024, 0) + ' kiB';
+};
+
+var showFileInfo = function (mfitxid, info) {
+    selectBody('fileinfo');
+
+    $('#mfitxid').text(mfitxid);
+    $('#filename').text(info.filename);
+    $('#size').text(getPrettyFileSize(info.size));
+    $('#sha1').text(info.sha1);
+    $('#sha256').text(info.sha256);
+    $('#firstictxid').text(info.indexChainTxID);
+
+    $('#download').prop('disabled', false);
+    $('#progress').hide();
+};
+
+var readFromQueryField = function () {
+    var txid = $('#txid').val();
+
+    if (txid.length == 64) {
+        readMasterFileIndex(txid);
+    }
+};
+
+var readMasterFileIndex = function (txid) {
+    var invalidMFI = function () {
+        showError('Invalid Master File Index transaction ID');
+    };
+
+    readTx(txid, function (rawData) {
+        var info = parseMasterFileIndex(rawData);
+
+        if (info != null) {
+            showFileInfo(txid, info);
+            FileInfo = info;
+            window.location.href = window.location.href.split('#')[0] + '#' + txid;
+        } else {
+            invalidMFI();
+        }
+    }, invalidMFI);
+};
+
+var download = function () {
+    var totalChunks = null;
+
+    var dlStatusUpdate = function (status, chunks, bytes) {
+        $('#dlstatus').text(status + '...');
+        $('#dlprogress').text('' + (totalChunks == null ? 0 : Math.round(chunks * 100 / totalChunks)) + ' %');
+        $('#dlchunks').text('' + chunks + (totalChunks == null ? '' : ' / ' + totalChunks));
+        $('#dlbytes').text('' + bytes);
+    }
+
+    var indexRawData = '';
+    var rawData = '';
+    var chunk = 0;
+    var nextIndexTxID = FileInfo.indexChainTxID;
+    var throttleTimeout = 100;
+
+    $('#progress').show();
+
+    var storeFile = function (filename, data) {
+        var $href = $('#dlhref');
+
+        $href.prop('href', 'data:application/octet-stream;charset=utf-8;base64,' + hexToBase64(data));
+        $href.prop('download', filename);
+        $href.show();
+
+        $href[0].click();
+    };
+
+    var getNextDataChunk = function () {
+        var dataChunkTxID = indexRawData.substr(0, 64);
+        indexRawData = indexRawData.substr(64);
+
+        readTx(dataChunkTxID, function (rawChunkData) {
+            chunk++;
+            rawData += rawChunkData.join('');
+            dlStatusUpdate('Downloading', chunk, rawData.length / 2);
+
+            if (indexRawData.length > 0) {
+                dlStatusUpdate('Downloading', chunk, rawData.length / 2);
+                setTimeout(getNextDataChunk, throttleTimeout);
+            } else {
+                dlStatusUpdate('Triggering browser', chunk, FileInfo.size);
+                storeFile(FileInfo.filename, rawData.substr(0, FileInfo.size * 2));
+            }
+        }, function () { alert('Error!'); });
+    };
+
+    var getNextIndexChunk = function () {
+        dlStatusUpdate('Resolving indices', chunk, 0);
+        readTx(nextIndexTxID, function (rawChunkData) {
+            chunk++;
+            nextIndexTxID = rawChunkData.shift();
+            indexRawData += rawChunkData.join('');
+
+            if (nextIndexTxID != '0000000000000000000000000000000000000000000000000000000000000000') {
+                setTimeout(getNextIndexChunk, throttleTimeout);
+            } else {
+                chunk = 0;
+                totalChunks = indexRawData.length / 64;
+                dlStatusUpdate('Downloading', 0, 0);
+                setTimeout(getNextDataChunk, throttleTimeout);
+            }
+        }, function () { alert('Error!'); });
+    };
+
+    getNextIndexChunk();
+};
+
+var init = function () {
+    $('#go').click(readFromQueryField);
+    $('#txid').keypress(function (e) {
+        if (e.which == 13) {
+            readFromQueryField();
+            return false;
+        }
+    });
+
+    $('#download').click(function () {
+        $('#download').prop('disabled', true);
+        download(FileInfo.indexChainTxID, FileInfo.size);
+    });
+
+    var txid = window.location.href.split('#')[1];
+
+    if (txid == undefined || txid.length != 64) {
+        showTxInputField();
+    } else {
+        readMasterFileIndex(txid);
+    }
+};
+        </script>
+        <title>Garlicoin Blockchain File Downloader</title>
+    </head>
+    <body style="text-align: center;" onLoad="init();">
+        <h1>Garlicoin Blockchain File Downloader</h1>
+        <p style="font-size: 11pt; font-style: italic;">
+            Download files hosted on the Garlicoin blockchain using the <a href="https://garlicinsight.com/">Garlic Insight</a> explorer public APIs.
+        </p>
+        <div id="fileinfo" style="display: none; padding-top: 60px;">
+            <table cellspacing="10" style="margin-left: auto; margin-right: auto;">
+                <tr>
+                    <th style="text-align: left;">File name</th>
+                    <td id="filename"></td>
+                </tr>
+                <tr>
+                    <th style="text-align: left;">File size</th>
+                    <td id="size"></td>
+                </tr>
+                <tr>
+                    <th style="text-align: left;">SHA1 digest</th>
+                    <td id="sha1"></td>
+                </tr>
+                <tr>
+                    <th style="text-align: left;">SHA256 digest</th>
+                    <td id="sha256"></td>
+                </tr>
+                <tr>
+                    <th style="text-align: left;">Master File Index</th>
+                    <td id="mfitxid"></td>
+                </tr>
+                <tr>
+                    <th style="text-align: left;">Index Chain Start</th>
+                    <td id="firstictxid"></td>
+                </tr>
+            </table>
+            <p>&nbsp;</p>
+            <table id="progress" cellspacing="10" style="margin-left: auto; margin-right: auto;">
+                <tr>
+                    <th id="dlstatus" colspan="2" style="text-align: center;"></th>
+                </tr>
+                <tr>
+                    <th style="text-align: left;">Progress</th>
+                    <td id="dlprogress"></td>
+                </tr>
+                <tr>
+                    <th style="text-align: left;">Chunks</th>
+                    <td id="dlchunks"></td>
+                </tr>
+                <tr>
+                    <th style="text-align: left;">Bytes</th>
+                    <td id="dlbytes"></td>
+                </tr>
+            </table>
+            <p>&nbsp;</p>
+            <input type="button" id="download" value="Download" style="padding: 10px; font-size: 12pt;" />
+            <p>
+                <a id="dlhref" style="display: none;" href="#">If the download does not start, click here</a>
+            </p>
+        </div>
+        <div id="query" style="display: none; padding-top: 150px;">
+            <p id="error" style="color: #bb0202; font-size: 16pt; font-weight: bold; padding-bottom: 60px;"></p>
+            <p style="font-size: 14pt;">Enter the <i><b>Master File Index Transaction ID</b></i> of the file you wish to download</p>
+            <input id="txid" size="64" maxlength="64" /> <input id="go" type="button" value="Go"/>
+        </div>
+    </body>
+</html>
