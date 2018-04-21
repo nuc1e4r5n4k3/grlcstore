@@ -3,6 +3,7 @@ import sys
 from binascii import hexlify, unhexlify
 from hashlib import sha1, sha256
 from os import path
+from time import sleep
 
 from jsonrpc.authproxy import AuthServiceProxy, JSONRPCException
 
@@ -14,10 +15,11 @@ RPCPORT = 42068
 
 MAGIC = 'GRLCFILE'
 
-BLOCKSIZE = 72
+BLOCKSIZE = 32
 CHUNKSIZE = BLOCKSIZE * 0xfb
 
 FEE = 0.001
+BURN_SATS = 33000
 
 __LAST_ID__ = '0000000000000000000000000000000000000000000000000000000000000000'
 
@@ -32,8 +34,8 @@ def get_rpc_proxy():
 class Transaction(object):
     VERSION = '02000000'
     INPUTS = '00'
-    COINS_OUT = '0000000000000000'
-    OP_RETURN = '6a'
+    COINS_OUT = '%02x%02x000000000000' % (BURN_SATS % 0x100, BURN_SATS / 0x100)
+    SW_V0 = '00'
     FOOTER = '00000000'
 
     def __init__(self, data_outputs):
@@ -44,7 +46,7 @@ class Transaction(object):
 
     def generate(self, data_outputs):
         if len(data_outputs) >= 0xfd:
-            outputs = 'fd' + '%02x%02x' % (len(data_outputs) % 256, len(data_outputs) / 256)
+            outputs = 'fd' + '%02x%02x' % (len(data_outputs) % 0x100, len(data_outputs) / 0x100)
         else:
             outputs = '%02x' % len(data_outputs)
 
@@ -53,12 +55,12 @@ class Transaction(object):
             data_len = len(output)
             self.template += self.COINS_OUT
             self.template += '%02X' % (data_len + 2)
-            self.template += self.OP_RETURN
+            self.template += self.SW_V0
             self.template += '%02X' % data_len + hexlify(output)
         self.template += self.FOOTER
 
     def fund(self):
-        self.unsigned = get_rpc_proxy().fundrawtransaction(self.template)['hex']
+        self.unsigned = get_rpc_proxy().fundrawtransaction(self.template, { 'feeRate': FEE })['hex']
 
     def sign(self):
         self.signed = get_rpc_proxy().signrawtransaction(self.unsigned)['hex']
@@ -75,10 +77,10 @@ class Chunk(object):
                 self.append(block)
 
     def prepend(self, block):
-        self.outputs.insert(0, block)
+        self.outputs.insert(0, (block + '\0' * BLOCKSIZE)[:BLOCKSIZE])
 
     def append(self, block):
-        self.outputs.append(block)
+        self.outputs.append((block + '\0' * BLOCKSIZE)[:BLOCKSIZE])
 
     def blocks(self):
         return self.outputs
@@ -89,13 +91,18 @@ class Chunk(object):
     def store(self):
         if self._tx == None:
             self._tx = Transaction(self.outputs)
-            try:
-                self._tx.fund()
-                self._tx.sign()
-                self._tx.broadcast()
-            except JSONRPCException as e:
-                print(e.error)
-                raise
+            sent = False
+            while not sent:
+                try:
+                    self._tx.fund()
+                    self._tx.sign()
+                    self._tx.broadcast()
+                    sent = True
+                except JSONRPCException as e:
+                    print(e.error)
+                    print('Error trying to create, sign or send out transaction, waiting 20 seconds before retrying')
+                    sleep(20)
+                    print('Retrying...')
         return self._tx.id
 
 class Blob(object):
@@ -133,7 +140,8 @@ class IndexedBlob(Blob):
 class ChainFile(object):
     def __init__(self, data, name='unnamed'):
         self.blob = IndexedBlob(data)
-        self.name = name[:BLOCKSIZE]
+        self.name = name
+        self.size = len(data)
         self.hash20 = sha1(data).digest()
         self.hash32 = sha256(data).digest()
 
@@ -142,7 +150,7 @@ class ChainFile(object):
         chunk = Chunk()
         chunk.append(MAGIC)
         chunk.append(self.name)
-        chunk.append(self.hash20)
+        chunk.append(self.hash20 + '\0' * (BLOCKSIZE - 28) + unhexlify('%016x' % self.size))
         chunk.append(self.hash32)
         chunk.append(unhexlify(first_index_chunk_id))
         return chunk.store()
